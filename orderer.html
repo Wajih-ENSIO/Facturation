@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <title>Import commandes – Facturation (TC fixes)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    :root{--bg:#f4f6fb;--card:#fff;--muted:#6b7280;--blue:#3b5bff}
+    body{font-family:Inter,system-ui,Segoe UI,Roboto,Arial;margin:18px;background:var(--bg);color:#111}
+    header{display:flex;align-items:center;gap:12px;margin-bottom:14px}
+    header img{height:46px}
+    h1{margin:0;font-size:20px}
+    .card{background:var(--card);padding:12px;border-radius:10px;box-shadow:0 2px 8px rgba(6,10,30,0.04);margin-bottom:12px}
+    #dropZone{border:2px dashed #9aa8ff;padding:24px;text-align:center;border-radius:8px;cursor:pointer;background:#fbfdff}
+    #dropZone.drag{background:#eef4ff}
+    .actions{display:flex;gap:8px;flex-wrap:wrap}
+    button{background:var(--blue);color:#fff;border:0;padding:8px 12px;border-radius:8px;cursor:pointer;font-weight:600}
+    button.secondary{background:#8c96a9}
+    button:disabled{opacity:.5;cursor:not-allowed}
+    .filters{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+    .small{font-size:13px;color:var(--muted)}
+    #log{font-family:monospace;background:#fff;padding:10px;border-radius:8px;max-height:220px;overflow:auto;border:1px solid #eef3fb}
+    table{width:100%;border-collapse:collapse;margin-top:10px;background:#fff}
+    table th,table td{padding:6px 8px;border:1px solid #e6eef8;font-size:13px;text-align:left}
+    th{background:#f6f8ff;position:sticky;top:0}
+    #tableWrapper{max-height:320px;overflow:auto}
+  </style>
+
+  <!-- pdf.js v2 (stable legacy) -->
+  <script src="https://unpkg.com/pdfjs-dist@2.16.105/build/pdf.min.js"></script>
+  <!-- SheetJS for optional Excel export (kept minimal) -->
+  <script src="https://unpkg.com/xlsx/dist/xlsx.full.min.js"></script>
+</head>
+<body>
+  <header>
+    <img src="logo.png" alt="Logo (change file name if needed)" onerror="this.style.display='none'">
+    <h1>Import commandes – Facturation</h1>
+  </header>
+
+  <div class="card" id="dropCard">
+    <div id="dropZone" tabindex="0">⬇️ Glissez vos PDFs (1–10) ici ou cliquez pour sélectionner</div>
+    <input id="fileInput" type="file" accept="application/pdf" multiple style="display:none">
+  </div>
+
+  <div class="card actions">
+    <div style="display:flex;gap:8px;align-items:center;">
+      <button id="processBtn">Importer</button>
+      <button id="exportBtn" class="secondary">Exporter Excel</button>
+      <button id="copyBtn" disabled>📋 Copier sans en-têtes</button>
+      <button id="clearBtn" class="secondary">🧹 Réinitialiser</button>
+    </div>
+
+    <div style="margin-left:auto" class="small">
+      <span id="fileCount">0 fichiers</span>
+    </div>
+  </div>
+
+  <div class="card filters">
+    <div class="small">Filtrer:</div>
+    <div>
+      <label class="small">Actif/Passif
+        <select id="filterAP"><option value="">Tous</option><option value="Actif">Actif</option><option value="Passif">Passif</option></select>
+      </label>
+    </div>
+    <div>
+      <label class="small">TC
+        <select id="filterTC"><option value="">Tous</option><option value="Oui">Oui</option><option value="Non">Non</option></select>
+      </label>
+    </div>
+  </div>
+
+  <div class="card" id="log" aria-live="polite"></div>
+
+  <div class="card" id="tableWrapper"><table id="previewTable"></table></div>
+
+<script>
+(async function(){
+  // elements
+  const dropZone = document.getElementById('dropZone');
+  const fileInput = document.getElementById('fileInput');
+  const processBtn = document.getElementById('processBtn');
+  const exportBtn = document.getElementById('exportBtn');
+  const copyBtn = document.getElementById('copyBtn');
+  const clearBtn = document.getElementById('clearBtn');
+  const fileCount = document.getElementById('fileCount');
+  const logEl = document.getElementById('log');
+  const previewTable = document.getElementById('previewTable');
+  const filterAP = document.getElementById('filterAP');
+  const filterTC = document.getElementById('filterTC');
+
+  if(window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://unpkg.com/pdfjs-dist@2.16.105/build/pdf.worker.min.js';
+
+  let selectedFiles = [];
+  let allRows = [];
+  let filteredRows = [];
+
+  const COLUMNS = [
+    "Code Opération","Numéro de Commande","Date de Commande",
+    "Numéro de Ligne","Nom du Forfait","Actif/Passif","Montant","TC"
+  ];
+
+  // logging helper
+  function log(msg, cls='') {
+    const d = document.createElement('div'); d.textContent = msg; if(cls) d.className = cls;
+    logEl.appendChild(d); logEl.scrollTop = logEl.scrollHeight;
+  }
+  function setFileCount(n){ fileCount.textContent = `${n} fichier(s)`; }
+
+  // drag & click
+  dropZone.addEventListener('click', () => fileInput.click());
+  dropZone.addEventListener('keydown', e => { if(e.key==='Enter' || e.key===' ') fileInput.click(); });
+
+  // prevent default open on window drop
+  ['dragenter','dragover','dragleave','drop'].forEach(ev => {
+    window.addEventListener(ev, (e)=> { if(e.dataTransfer && e.dataTransfer.types && Array.prototype.includes.call(e.dataTransfer.types,'Files')) { e.preventDefault(); } }, {passive:false});
+  });
+
+  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag'); try{ e.dataTransfer.dropEffect='copy'; }catch{} });
+  dropZone.addEventListener('dragleave', ()=> dropZone.classList.remove('drag'));
+
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault(); dropZone.classList.remove('drag');
+    addFiles(Array.from(e.dataTransfer.files || []).filter(f => f.name && f.name.toLowerCase().endsWith('.pdf')));
+  });
+
+  fileInput.addEventListener('change', (e)=> addFiles(Array.from(e.target.files || [])));
+
+  function addFiles(list){
+    for(const f of list){
+      if(!f.name.toLowerCase().endsWith('.pdf')) continue;
+      if(selectedFiles.some(s => s.name===f.name && s.size===f.size)) continue;
+      selectedFiles.push(f);
+      if(selectedFiles.length >= 30) break;
+    }
+    if(selectedFiles.length > 10) selectedFiles = selectedFiles.slice(0,10);
+    setFileCount(selectedFiles.length);
+    log(`Added ${list.length} file(s). Total: ${selectedFiles.length}`);
+  }
+
+  // --- flexible finders (borrowed from your older version) ---
+  function findPackage(chunk){
+    const patterns = [
+      /REAM[-\sA-Z0-9&]+/i,
+      /Nom du Forfait[:\s-]*([A-Z0-9\-\s&\/]+)/i,
+      /Forfait[:\s-]*([A-Z0-9\-\s&\/]+)/i,
+      /([A-Z]{2,}-[A-Z0-9\-\&]{2,})/i,
+      /([A-Z0-9\-]{3,}TC[A-Z0-9\-]*)/i // TC-centered fallback
+    ];
+    for(const p of patterns){
+      const m = chunk.match(p);
+      if(m){
+        return (m[1] && m[1].trim()) ? m[1].trim() : m[0].trim();
+      }
+    }
+    return null;
+  }
+
+  function findBodega(chunk){
+    const m1 = chunk.match(/Bodega\s*[:\-]?\s*([A-Z0-9\-X]+)/i);
+    if(m1) return m1[1].trim();
+    const m2 = chunk.match(/Code\s*Op[eé]ration\s*[:\-]?\s*([A-Z0-9\-X]+)/i);
+    if(m2) return m2[1].trim();
+    const m3 = chunk.match(/Bodega[\s\-]*([A-Z0-9\-X]+)/i);
+    if(m3) return m3[1].trim();
+    return null;
+  }
+
+  function findAmount(chunk){
+    const patterns = [
+      /P\.?\s*U\.?\s*H\.?\s*T\.?\s*[:\-]?\s*([\d\s,.]+)\s*EUR/i,
+      /PUHT\s*[:\-]?\s*([\d\s,.]+)\s*EUR/i,
+      /P\.U\.H\.T\s*[:\-]?\s*([\d\s,.]+)\s*EUR/i,
+      /([\d\s,.]+)\s*EUR/ // fallback
+    ];
+    for(const p of patterns){
+      const m = chunk.match(p);
+      if(m){
+        const s = m[1].replace(/\s/g,'').replace(',', '.');
+        const num = parseFloat(s);
+        if(!Number.isNaN(num)) return num;
+      }
+    }
+    return null;
+  }
+
+  // Extract text with pdf.js
+  async function extractTextFromPdfFile(file){
+    const arrayBuffer = await file.arrayBuffer();
+    const loadingTask = pdfjsLib.getDocument({data: new Uint8Array(arrayBuffer)});
+    const pdf = await loadingTask.promise;
+    let full = '';
+    for(let i=1;i<=pdf.numPages;i++){
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      full += content.items.map(it => it.str).join(' ') + '\n';
+    }
+    return full;
+  }
+
+  // parse a single PDF text and return rows
+  function parseOrderText(text, filename){
+    const normalized = (text||'').replace(/\r/g,'');
+    const orderMatch = normalized.match(/AA\d{8}/);
+    if(!orderMatch){ log(`⚠️ No order number in ${filename}`, 'warning'); return []; }
+    const orderNum = orderMatch[0];
+    const dateMatch = normalized.match(/Emise le (\d{2}\/\d{2}\/\d{4})/);
+    const orderDate = dateMatch ? dateMatch[1] : '';
+
+    const lineRegex = /Ligne N°\s*:\s*(\d+)/g;
+    const matches = Array.from(normalized.matchAll(lineRegex));
+    if(!matches.length){ log(`⚠️ No line items in ${filename}`, 'warning'); return []; }
+
+    const rows = [];
+    for(let i=0;i<matches.length;i++){
+      const lineNum = parseInt(matches[i][1],10);
+      const start = matches[i].index + matches[i][0].length;
+      const end = (i+1 < matches.length) ? matches[i+1].index : normalized.length;
+      const chunk = normalized.substring(start,end).trim();
+
+      const chunkPreview = chunk.replace(/\s+/g,' ').slice(0,350);
+
+      let packageName = findPackage(chunk);
+      let bodega = findBodega(chunk);
+      let amount = findAmount(chunk);
+
+      // TC fallback: if no package but chunk contains TC-ish token, try to build a package name around it
+      if(!packageName && /(?:\bTC\b|\bT\.C\.|\bT C\b)/i.test(chunk)){
+        // try to extract a reasonably sized substring around the first TC occurrence
+        const idx = chunk.search(/(?:\bTC\b|\bT\.C\.|\bT C\b)/i);
+        if(idx >= 0){
+          const left = Math.max(0, idx - 40);
+          const right = Math.min(chunk.length, idx + 40);
+          const snippet = chunk.substring(left, right).replace(/\s+/g,' ');
+          // try to find an uppercase token or REAM-like substring
+          const alt = snippet.match(/[A-Z0-9\-\s&]{3,}TC[A-Z0-9\-\s&]*/i) || snippet.match(/[A-Z0-9\-\s&]{3,}/i);
+          if(alt) packageName = alt[0].trim();
+        }
+      }
+
+      // log per missing item + preview
+      if(!packageName) { log(`⚠️ No package for line ${lineNum} in ${filename}`); log(`  preview: "${chunkPreview}"`); }
+      if(!bodega) { log(`⚠️ No bodega for line ${lineNum} in ${filename}`); log(`  preview: "${chunkPreview}"`); }
+      if(amount === null) { log(`⚠️ No amount for line ${lineNum} in ${filename}`); log(`  preview: "${chunkPreview}"`); }
+
+      if(!packageName || !bodega || amount === null){
+        log(`  → Skipping line ${lineNum} (missing data)`);
+        continue;
+      }
+
+      // Actif/Passif and TC detection
+      let actifPassif = "Passif";
+      if(packageName.toUpperCase().includes('-FBA-')) actifPassif = "Actif";
+      else if(packageName.toUpperCase().includes('-FBP-')) actifPassif = "Passif";
+      else if(chunk.includes('Actif')) actifPassif = "Actif";
+
+      let tcValue = /(?:\bTC\b|\bT\.C\.|\bT C\b)/i.test(packageName) || /(?:\bTC\b|\bT\.C\.|\bT C\b)/i.test(chunk) ? "Oui" : "Non";
+
+      rows.push({
+        'Code Opération': bodega,
+        'Numéro de Commande': orderNum,
+        'Date de Commande': orderDate,
+        'Numéro de Ligne': lineNum,
+        'Nom du Forfait': packageName,
+        'Actif/Passif': actifPassif,
+        'Montant': amount,
+        'TC': tcValue
+      });
+    }
+
+    log(`✓ Extracted ${rows.length} line(s) from ${filename}`);
+    return rows;
+  }
+
+  // render preview table
+  function renderTable(rows){
+    previewTable.innerHTML = '';
+    const thead = document.createElement('thead');
+    const trh = document.createElement('tr');
+    for(const c of COLUMNS){ const th = document.createElement('th'); th.textContent = c; trh.appendChild(th); }
+    thead.appendChild(trh); previewTable.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    rows.forEach(r => {
+      const tr = document.createElement('tr');
+      for(const c of COLUMNS){ const td = document.createElement('td'); td.textContent = r[c]; tr.appendChild(td); }
+      tbody.appendChild(tr);
+    });
+    previewTable.appendChild(tbody);
+  }
+
+  // apply filters and re-render
+  function applyFilters(){
+    filteredRows = allRows.filter(r => {
+      if(filterAP.value && r['Actif/Passif'] !== filterAP.value) return false;
+      if(filterTC.value && r['TC'] !== filterTC.value) return false;
+      return true;
+    });
+    renderTable(filteredRows);
+  }
+
+  filterAP.addEventListener('change', applyFilters);
+  filterTC.addEventListener('change', applyFilters);
+
+  // process all selected files
+  processBtn.addEventListener('click', async ()=>{
+    if(!selectedFiles.length){ log('❌ Aucun fichier sélectionné','error'); return; }
+    allRows = []; filteredRows = [];
+    logEl.innerHTML = ''; setFileCount(selectedFiles.length);
+    for(const f of selectedFiles){
+      try{
+        log(`Processing ${f.name}`);
+        const txt = await extractTextFromPdfFile(f);
+        const rows = parseOrderText(txt, f.name);
+        if(rows && rows.length) allRows.push(...rows);
+      }catch(err){
+        log(`❌ Error ${f.name}: ${err && err.message ? err.message : err}`);
+      }
+    }
+    if(!allRows.length){ log('❌ Aucun élément extrait','error'); renderTable([]); copyBtn.disabled = true; return; }
+    filteredRows = [...allRows];
+    renderTable(filteredRows);
+    applyFilters();
+    copyBtn.disabled = false;
+    log(`✅ Total lignes extraites: ${allRows.length}`, 'success');
+  });
+
+  // copy without headers -> tabs
+  copyBtn.addEventListener('click', async ()=>{
+    if(!filteredRows.length){ log('❌ Rien à copier','error'); return; }
+    let out = '';
+    for(const r of filteredRows) out += COLUMNS.map(c => r[c] ?? '').join('\t') + '\n';
+    try{
+      await navigator.clipboard.writeText(out);
+      log('📋 Tableau copié (sans en-têtes)','success');
+    }catch(e){ log('❌ Erreur copie: '+ (e && e.message ? e.message : e),'error'); }
+  });
+
+  // export Excel (optional)
+  exportBtn.addEventListener('click', ()=>{
+    if(!filteredRows.length){ log('❌ Rien à exporter','error'); return; }
+    const headers = COLUMNS.slice();
+    const data = [headers].concat(filteredRows.map(r => headers.map(h => r[h] ?? '')));
+    const ws = XLSX.utils.aoa_to_sheet(data);
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Facturation');
+    XLSX.writeFile(wb, `Facturation_Import_${new Date().toISOString().slice(0,19).replace(/[:T]/g,'_')}.xlsx`);
+    log('✅ Export Excel généré','success');
+  });
+
+  // clear / reset
+  clearBtn.addEventListener('click', ()=>{
+    selectedFiles = []; allRows = []; filteredRows = [];
+    fileInput.value = ''; setFileCount(0); logEl.innerHTML = ''; previewTable.innerHTML = ''; filterAP.value=''; filterTC.value=''; copyBtn.disabled = true;
+  });
+
+  // initialise
+  function setFileCount(n){ fileCount.textContent = `${n} fichier(s)`; }
+  setFileCount(0);
+
+})();
+</script>
+</body>
+</html>
