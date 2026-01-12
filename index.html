@@ -137,16 +137,20 @@
     log(`Added ${list.length} file(s). Total: ${selectedFiles.length}`);
   }
 
-  // --- flexible finders (borrowed from your older version) ---
+  // --- UPDATED: Priority check for SN- patterns ---
   function findPackage(chunk){
-    // PRIORITY: Check for SN- prefixed codes first
-    const snPattern = /SN-[A-Z0-9\-]+/i;
-    const snMatch = chunk.match(snPattern);
-    if(snMatch){
-      return snMatch[0].trim();
+    // PRIORITY 1: Look for SN- pattern (case-insensitive, captures full code)
+    // Matches: SN-FBA-T3AH-36m, SN-ABC-123, etc.
+    const snPattern = /SN-[A-Z0-9\-]+/gi;
+    const snMatches = chunk.match(snPattern);
+    if(snMatches && snMatches.length > 0){
+      // Return the first SN- match found
+      const snCode = snMatches[0].trim();
+      log(`  → Found SN- code: ${snCode}`);
+      return snCode;
     }
     
-    // If no SN- pattern found, try other patterns
+    // PRIORITY 2: If no SN- found, try other patterns
     const patterns = [
       /REAM[-\sA-Z0-9&]+/i,
       /Nom du Forfait[:\s-]*([A-Z0-9\-\s&\/]+)/i,
@@ -157,7 +161,9 @@
     for(const p of patterns){
       const m = chunk.match(p);
       if(m){
-        return (m[1] && m[1].trim()) ? m[1].trim() : m[0].trim();
+        const result = (m[1] && m[1].trim()) ? m[1].trim() : m[0].trim();
+        log(`  → Found package via pattern: ${result}`);
+        return result;
       }
     }
     return null;
@@ -226,6 +232,8 @@
       const chunk = normalized.substring(start,end).trim();
 
       const chunkPreview = chunk.replace(/\s+/g,' ').slice(0,350);
+      
+      log(`Processing line ${lineNum}...`);
 
       let packageName = findPackage(chunk);
       let bodega = findBodega(chunk);
@@ -360,11 +368,9 @@
   });
 
   // initialise
-  function setFileCount(n){ fileCount.textContent = `${n} fichier(s)`; }
   setFileCount(0);
 
 })();
 </script>
 </body>
 </html>
-
