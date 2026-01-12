@@ -139,6 +139,14 @@
 
   // --- flexible finders (borrowed from your older version) ---
   function findPackage(chunk){
+    // PRIORITY: Check for SN- prefixed codes first
+    const snPattern = /SN-[A-Z0-9\-]+/i;
+    const snMatch = chunk.match(snPattern);
+    if(snMatch){
+      return snMatch[0].trim();
+    }
+    
+    // If no SN- pattern found, try other patterns
     const patterns = [
       /REAM[-\sA-Z0-9&]+/i,
       /Nom du Forfait[:\s-]*([A-Z0-9\-\s&\/]+)/i,
@@ -359,3 +367,4 @@
 </script>
 </body>
 </html>
+
