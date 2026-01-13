@@ -137,9 +137,9 @@
     log(`Added ${list.length} file(s). Total: ${selectedFiles.length}`);
   }
 
-  // --- UPDATED: Priority check for SN- patterns ---
+  // --- UPDATED: Priority check for SN- and T-TS- patterns ---
   function findPackage(chunk){
-    // PRIORITY 1: Look for SN- pattern (case-insensitive, captures full code)
+    // PRIORITY 1a: Look for SN- pattern (case-insensitive, captures full code)
     // Matches: SN-FBA-T3AH-36m, SN-ABC-123, etc.
     const snPattern = /SN-[A-Z0-9\-]+/gi;
     const snMatches = chunk.match(snPattern);
@@ -149,6 +149,20 @@
       log(`  → Found SN- code: ${snCode}`);
       return snCode;
     }
+    
+    // PRIORITY 1b: Look for T-TS- pattern, but stop at "Travaux"
+    // This pattern accounts for line breaks but stops before capturing "Travaux"
+    // Matches: T-TS-FCP-XXX but stops before "Travaux"
+    const ttsPattern = /T-TS-[A-Z0-9\-\s]+?(?=Travaux|$)/gi;
+    const ttsMatches = chunk.match(ttsPattern);
+    if(ttsMatches && ttsMatches.length > 0){
+      // Clean up the match: remove extra whitespace/newlines and trim
+      const ttsCode = ttsMatches[0].replace(/\s+/g, '').trim();
+      log(`  → Found T-TS- code: ${ttsCode}`);
+      return ttsCode;
+    }
+    
+    // PRIORITY 2: If no SN- or T-TS- found, try other patterns
     
     // PRIORITY 2: If no SN- found, try other patterns
     const patterns = [
@@ -170,28 +184,66 @@
   }
 
   function findBodega(chunk){
+    // Try standard patterns first
     const m1 = chunk.match(/Bodega\s*[:\-]?\s*([A-Z0-9\-X]+)/i);
     if(m1) return m1[1].trim();
     const m2 = chunk.match(/Code\s*Op[eé]ration\s*[:\-]?\s*([A-Z0-9\-X]+)/i);
     if(m2) return m2[1].trim();
     const m3 = chunk.match(/Bodega[\s\-]*([A-Z0-9\-X]+)/i);
     if(m3) return m3[1].trim();
-    return null;
+    
+    // Try to find Site reference pattern (Site : XXXX_XXX_XXX or similar)
+    const m4 = chunk.match(/Site\s*[:\-]?\s*([A-Z0-9_\-]+)/i);
+    if(m4) return m4[1].trim();
+    
+    // If still nothing found, return a placeholder instead of null
+    // This prevents skipping lines that have valid package and amount data
+    return "N/A";
   }
 
   function findAmount(chunk){
     const patterns = [
-      /P\.?\s*U\.?\s*H\.?\s*T\.?\s*[:\-]?\s*([\d\s,.]+)\s*EUR/i,
-      /PUHT\s*[:\-]?\s*([\d\s,.]+)\s*EUR/i,
-      /P\.U\.H\.T\s*[:\-]?\s*([\d\s,.]+)\s*EUR/i,
-      /([\d\s,.]+)\s*EUR/ // fallback
+      // Match various amount formats with "Total HT", "Montant HT", "PUHT", etc.
+      /Total\s*H\.?T\.?\s*[:\-]?\s*([\d\s,\.]+)\s*EUR/i,
+      /Montant\s*H\.?T\.?\s*[:\-]?\s*([\d\s,\.]+)\s*EUR/i,
+      /P\.?\s*U\.?\s*H\.?\s*T\.?\s*[:\-]?\s*([\d\s,\.]+)\s*EUR/i,
+      /PUHT\s*[:\-]?\s*([\d\s,\.]+)\s*EUR/i,
+      /P\.U\.H\.T\s*[:\-]?\s*([\d\s,\.]+)\s*EUR/i,
+      /([\d\s,\.]+)\s*EUR/ // fallback
     ];
     for(const p of patterns){
       const m = chunk.match(p);
       if(m){
-        const s = m[1].replace(/\s/g,'').replace(',', '.');
+        // Remove all spaces first
+        let s = m[1].replace(/\s/g,'');
+        
+        // Count periods and commas to determine format
+        const periodCount = (s.match(/\./g) || []).length;
+        const commaCount = (s.match(/,/g) || []).length;
+        
+        // Determine the format based on the last separator
+        const lastPeriodIndex = s.lastIndexOf('.');
+        const lastCommaIndex = s.lastIndexOf(',');
+        
+        if(lastCommaIndex > lastPeriodIndex){
+          // Last separator is comma - European format (1.234,56)
+          // Remove periods (thousands), replace comma with period (decimal)
+          s = s.replace(/\./g, '').replace(',', '.');
+        } else if(lastPeriodIndex > lastCommaIndex){
+          // Last separator is period - US format (1,234.56)
+          // Remove commas (thousands), keep period (decimal)
+          s = s.replace(/,/g, '');
+        } else {
+          // No separators or equal positions (edge case)
+          // Just remove commas
+          s = s.replace(/,/g, '');
+        }
+        
         const num = parseFloat(s);
-        if(!Number.isNaN(num)) return num;
+        if(!Number.isNaN(num)) {
+          log(`  → Found amount: ${num} from "${m[0]}"`);
+          return num;
+        }
       }
     }
     return null;
